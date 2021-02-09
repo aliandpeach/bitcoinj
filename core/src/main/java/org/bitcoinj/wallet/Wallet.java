@@ -124,12 +124,12 @@ import static com.google.common.base.Preconditions.*;
 public class Wallet extends BaseTaggableObject
     implements NewBestBlockListener, TransactionReceivedInBlockListener, PeerFilterProvider, KeyBag, TransactionBag, ReorganizeListener {
     private static final Logger log = LoggerFactory.getLogger(Wallet.class);
-    private static final int MINIMUM_BLOOM_DATA_LENGTH = 8;
-
     // Ordering: lock > keyChainGroupLock. KeyChainGroup is protected separately to allow fast querying of current receive address
     // even if the wallet itself is busy e.g. saving or processing a big reorg. Useful for reducing UI latency.
-    protected final ReentrantLock lock = Threading.lock("wallet");
-    protected final ReentrantLock keyChainGroupLock = Threading.lock("wallet-keychaingroup");
+    protected final ReentrantLock lock = Threading.lock(Wallet.class);
+    protected final ReentrantLock keyChainGroupLock = Threading.lock("Wallet-KeyChainGroup lock");
+
+    private static final int MINIMUM_BLOOM_DATA_LENGTH = 8;
 
     // The various pools below give quick access to wallet-relevant transactions by the state they're in:
     //
@@ -160,7 +160,7 @@ public class Wallet extends BaseTaggableObject
 
     // All the TransactionOutput objects that we could spend (ignoring whether we have the private key or not).
     // Used to speed up various calculations.
-    protected final HashSet<TransactionOutput> myUnspents = Sets.newHashSet();
+    protected final HashSet<TransactionOutput> myUnspents = new HashSet<>();
 
     // Transactions that were dropped by the risk analysis system. These are not in any pools and not serialized
     // to disk. We have to keep them around because if we ignore a tx because we think it will never confirm, but
@@ -460,7 +460,7 @@ public class Wallet extends BaseTaggableObject
         this.context = checkNotNull(context);
         this.params = checkNotNull(context.getParams());
         this.keyChainGroup = checkNotNull(keyChainGroup);
-        watchedScripts = Sets.newHashSet();
+        watchedScripts = new HashSet<>();
         unspent = new HashMap<>();
         spent = new HashMap<>();
         pending = new HashMap<>();
@@ -1267,7 +1267,7 @@ public class Wallet extends BaseTaggableObject
                     }
                 } catch (ScriptException e) {
                     // Just means we didn't understand the output of this transaction: ignore it.
-                    log.warn("Could not parse tx output script: {}", e.toString());
+                    log.info("Could not parse tx output script: {}", e.toString());
                 }
             }
         } finally {
@@ -1349,9 +1349,7 @@ public class Wallet extends BaseTaggableObject
             final KeyCrypter crypter = keyChainGroup.getKeyCrypter();
             checkState(crypter != null, "Not encrypted");
             keyChainGroup.decrypt(crypter.deriveKey(password));
-        } catch (KeyCrypterException.InvalidCipherText e) {
-            throw new BadWalletEncryptionKeyException(e);
-        } catch (KeyCrypterException.PublicPrivateMismatch e) {
+        } catch (KeyCrypterException.InvalidCipherText | KeyCrypterException.PublicPrivateMismatch e) {
             throw new BadWalletEncryptionKeyException(e);
         } finally {
             keyChainGroupLock.unlock();
@@ -1370,9 +1368,7 @@ public class Wallet extends BaseTaggableObject
         keyChainGroupLock.lock();
         try {
             keyChainGroup.decrypt(aesKey);
-        } catch (KeyCrypterException.InvalidCipherText e) {
-            throw new BadWalletEncryptionKeyException(e);
-        } catch (KeyCrypterException.PublicPrivateMismatch e) {
+        } catch (KeyCrypterException.InvalidCipherText | KeyCrypterException.PublicPrivateMismatch e) {
             throw new BadWalletEncryptionKeyException(e);
         } finally {
             keyChainGroupLock.unlock();
@@ -1711,12 +1707,8 @@ public class Wallet extends BaseTaggableObject
      */
     public static Wallet loadFromFile(File file, @Nullable WalletExtension... walletExtensions) throws UnreadableWalletException {
         try {
-            FileInputStream stream = null;
-            try {
-                stream = new FileInputStream(file);
+            try (FileInputStream stream = new FileInputStream(file)) {
                 return loadFromFileStream(stream, walletExtensions);
-            } finally {
-                if (stream != null) stream.close();
             }
         } catch (IOException e) {
             throw new UnreadableWalletException("Could not open file", e);
@@ -2014,14 +2006,14 @@ public class Wallet extends BaseTaggableObject
      */
     private Set<Transaction> findDoubleSpendsAgainst(Transaction tx, Map<Sha256Hash, Transaction> candidates) {
         checkState(lock.isHeldByCurrentThread());
-        if (tx.isCoinBase()) return Sets.newHashSet();
+        if (tx.isCoinBase()) return new HashSet<>();
         // Compile a set of outpoints that are spent by tx.
         HashSet<TransactionOutPoint> outpoints = new HashSet<>();
         for (TransactionInput input : tx.getInputs()) {
             outpoints.add(input.getOutpoint());
         }
         // Now for each pending transaction, see if it shares any outpoints with this tx.
-        Set<Transaction> doubleSpendTxns = Sets.newHashSet();
+        Set<Transaction> doubleSpendTxns = new HashSet<>();
         for (Transaction p : candidates.values()) {
             if (p.equals(tx))
                 continue;
@@ -2184,7 +2176,8 @@ public class Wallet extends BaseTaggableObject
                 // When a tx is received from the best chain, if other txns that spend this tx are IN_CONFLICT,
                 // change its confidence to PENDING (Unless they are also spending other txns IN_CONFLICT).
                 // Consider dependency chains.
-                Set<Transaction> currentTxDependencies = Sets.newHashSet(tx);
+                Set<Transaction> currentTxDependencies = new HashSet<>();
+                currentTxDependencies.add(tx);
                 addTransactionsDependingOn(currentTxDependencies, getTransactions(true));
                 currentTxDependencies.remove(tx);
                 List<Transaction> currentTxDependenciesSorted = sortTxnsByDependency(currentTxDependencies);
@@ -3907,11 +3900,17 @@ public class Wallet extends BaseTaggableObject
     /** A SendResult is returned to you as part of sending coins to a recipient. */
     public static class SendResult {
         /** The Bitcoin transaction message that moves the money. */
-        public Transaction tx;
+        public final Transaction tx;
         /** A future that will complete once the tx message has been successfully broadcast to the network. This is just the result of calling broadcast.future() */
-        public ListenableFuture<Transaction> broadcastComplete;
+        public final ListenableFuture<Transaction> broadcastComplete;
         /** The broadcast object returned by the linked TransactionBroadcaster */
-        public TransactionBroadcast broadcast;
+        public final TransactionBroadcast broadcast;
+
+        public SendResult(Transaction tx, TransactionBroadcast broadcast) {
+            this.tx = tx;
+            this.broadcast = broadcast;
+            this.broadcastComplete = broadcast.future();
+        }
     }
 
     /**
@@ -4104,15 +4103,12 @@ public class Wallet extends BaseTaggableObject
         // Commit the TX to the wallet immediately so the spent coins won't be reused.
         // TODO: We should probably allow the request to specify tx commit only after the network has accepted it.
         Transaction tx = sendCoinsOffline(request);
-        SendResult result = new SendResult();
-        result.tx = tx;
+        SendResult result = new SendResult(tx, broadcaster.broadcastTransaction(tx));
         // The tx has been committed to the pending pool by this point (via sendCoinsOffline -> commitTx), so it has
         // a txConfidenceListener registered. Once the tx is broadcast the peers will update the memory pool with the
         // count of seen peers, the memory pool will update the transaction confidence object, that will invoke the
         // txConfidenceListener which will in turn invoke the wallets event listener onTransactionConfidenceChanged
         // method.
-        result.broadcast = broadcaster.broadcastTransaction(tx);
-        result.broadcastComplete = result.broadcast.future();
         return result;
     }
 
@@ -4381,9 +4377,7 @@ public class Wallet extends BaseTaggableObject
 
             // resolve missing sigs if any
             new MissingSigResolutionSigner(req.missingSigsMode).signInputs(proposal, maybeDecryptingKeyBag);
-        } catch (KeyCrypterException.InvalidCipherText e) {
-            throw new BadWalletEncryptionKeyException(e);
-        } catch (KeyCrypterException.PublicPrivateMismatch e) {
+        } catch (KeyCrypterException.InvalidCipherText | KeyCrypterException.PublicPrivateMismatch e) {
             throw new BadWalletEncryptionKeyException(e);
         } finally {
             lock.unlock();
@@ -4871,29 +4865,6 @@ public class Wallet extends BaseTaggableObject
             return size;
         } finally {
             endBloomFilterCalculation();
-        }
-    }
-
-    /**
-     * If we are watching any scripts, the bloom filter must update on peers whenever an output is
-     * identified.  This is because we don't necessarily have the associated pubkey, so we can't
-     * watch for it on spending transactions.
-     */
-    @Override
-    public boolean isRequiringUpdateAllBloomFilter() {
-        // This is typically called by the PeerGroup, in which case it will have already explicitly taken the lock
-        // before calling, but because this is public API we must still lock again regardless.
-        keyChainGroupLock.lock();
-        try {
-            if (!watchedScripts.isEmpty())
-                return true;
-            if (keyChainGroup.chains != null)
-                for (DeterministicKeyChain chain : keyChainGroup.chains)
-                    if (chain.getOutputScriptType() == Script.ScriptType.P2WPKH)
-                        return true;
-            return false;
-        } finally {
-            keyChainGroupLock.unlock();
         }
     }
 

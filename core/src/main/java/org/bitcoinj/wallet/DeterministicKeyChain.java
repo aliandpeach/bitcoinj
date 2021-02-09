@@ -22,6 +22,7 @@ import org.bitcoinj.core.NetworkParameters;
 import org.bitcoinj.core.Utils;
 import org.bitcoinj.crypto.*;
 import org.bitcoinj.script.Script;
+import org.bitcoinj.utils.ListenerRegistration;
 import org.bitcoinj.utils.Threading;
 import org.bitcoinj.wallet.listeners.KeyChainEventListener;
 
@@ -97,9 +98,9 @@ import static com.google.common.base.Preconditions.*;
 @SuppressWarnings("PublicStaticCollectionField")
 public class DeterministicKeyChain implements EncryptableKeyChain {
     private static final Logger log = LoggerFactory.getLogger(DeterministicKeyChain.class);
-    public static final String DEFAULT_PASSPHRASE_FOR_MNEMONIC = "";
+    protected final ReentrantLock lock = Threading.lock(DeterministicKeyChain.class);
 
-    protected final ReentrantLock lock = Threading.lock("DeterministicKeyChain");
+    public static final String DEFAULT_PASSPHRASE_FOR_MNEMONIC = "";
 
     private DeterministicHierarchy hierarchy;
     @Nullable private DeterministicKey rootKey;
@@ -425,6 +426,9 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
             key = new DeterministicKey(key.dropPrivateBytes(), parent);
             hierarchy.putKey(key);
             basicKeyChain.importKey(key);
+        }
+        for (ListenerRegistration<KeyChainEventListener> listener : chain.basicKeyChain.getListeners()) {
+            basicKeyChain.addEventListener(listener);
         }
     }
 
@@ -1033,6 +1037,9 @@ public class DeterministicKeyChain implements EncryptableKeyChain {
         }
         chain.issuedExternalKeys = issuedExternalKeys;
         chain.issuedInternalKeys = issuedInternalKeys;
+        for (ListenerRegistration<KeyChainEventListener> listener : basicKeyChain.getListeners()) {
+            chain.basicKeyChain.addEventListener(listener);
+        }
         return chain;
     }
 
